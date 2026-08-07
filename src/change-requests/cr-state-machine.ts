@@ -12,13 +12,13 @@ import { Errors } from '../common/errors';
  * DRAFT -> APPROVED happen directly. Make it enforce the declared transitions.
  */
 export const LEGAL_TRANSITIONS: Partial<Record<CrStatus, CrStatus[]>> = {
-	[CrStatus.DRAFT]: [CrStatus.SUBMITTED, CrStatus.CANCELLED],
-	[CrStatus.SUBMITTED]: [CrStatus.PENDING_APPROVAL, CrStatus.CANCELLED],
-	// TODO: PENDING_APPROVAL -> APPROVED | COMMITTEE_VOTING | RETURNED | REJECTED
-	// TODO: COMMITTEE_VOTING -> COMMITTEE_DECISION
-	// TODO: COMMITTEE_DECISION -> APPROVED | REJECTED
-	// TODO: APPROVED -> APPLIED
-	// TODO: RETURNED -> DRAFT
+	[CrStatus.DRAFT]: [CrStatus.SUBMITTED, CrStatus.REJECTED, CrStatus.CANCELLED],
+	[CrStatus.SUBMITTED]: [CrStatus.PENDING_APPROVAL, CrStatus.REJECTED, CrStatus.CANCELLED],
+	[CrStatus.PENDING_APPROVAL]: [CrStatus.APPROVED, CrStatus.COMMITTEE_VOTING, CrStatus.RETURNED, CrStatus.REJECTED, CrStatus.CANCELLED],
+	[CrStatus.COMMITTEE_VOTING]: [CrStatus.COMMITTEE_DECISION, CrStatus.RETURNED, CrStatus.REJECTED, CrStatus.CANCELLED],
+	[CrStatus.COMMITTEE_DECISION]: [CrStatus.APPROVED, CrStatus.REJECTED, CrStatus.CANCELLED],
+	[CrStatus.APPROVED]: [CrStatus.APPLIED, CrStatus.CANCELLED],
+	[CrStatus.RETURNED]: [CrStatus.DRAFT, CrStatus.REJECTED, CrStatus.CANCELLED],
 };
 
 export function canTransition(from: CrStatus, to: CrStatus): boolean {
@@ -34,7 +34,5 @@ export function assertTransition(from: CrStatus, to: CrStatus): void {
 	if (!canTransition(from, to)) {
 		throw Errors.illegalTransition(`Illegal transition: cannot move a ${from} change request to ${to}`);
 	}
-	// TODO: this only checks that `from` is non-terminal. It must also reject transitions that
-	// are not declared legal above (use canTransition(from, to)).
 	return;
 }
