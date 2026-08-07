@@ -44,15 +44,37 @@ export class CrService {
 	}
 
 	sendForApproval(user: ReqUser, id: string, at: string): ChangeRequest {
-		// TODO: move SUBMITTED -> PENDING_APPROVAL, and decide single-approver vs committee
-		//       routing based on |delta| and COMMITTEE_DELTA_THRESHOLD.
-		throw Errors.validation('sendForApproval not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) {
+			throw Errors.forbidden('Cannot send for approval');
+		}
+
+		const agreement = this.agreements.get(cr.agreementId);
+		if (!agreement) throw Errors.notFound('Agreement not found');
+
+		cr.totals = computeTotals(agreement, cr);
+
+		const nextStatus = Math.abs(cr.totals.delta) >= COMMITTEE_DELTA_THRESHOLD ? CrStatus.COMMITTEE_VOTING : CrStatus.PENDING_APPROVAL;
+
+		this.transition(cr, nextStatus, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		return this.repo.save(cr);
 	}
 
 	approve(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: permission check (cr_a_*); legal transition; record approval + audit.
 		//       Committee CRs approve only via committee resolution.
-		throw Errors.validation('approve not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
+			throw Errors.forbidden('Cannot approve');
+		}
+
+		if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
+			throw Errors.validation('Committee change requests must be approved by committee resolution');
+		}
+
+		cr.approvals = [...cr.approvals, { userId: user.id, action: 'APPROVE', at }];
+		this.transition(cr, CrStatus.APPROVED, CrAction.APPROVE, user.id, at);
+		return this.repo.save(cr);
 	}
 
 	castVote(user: ReqUser, id: string, decision: 'APPROVE' | 'REJECT', at: string): ChangeRequest {
@@ -61,20 +83,57 @@ export class CrService {
 	}
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
-		// TODO: PENDING_APPROVAL -> RETURNED -> editable as DRAFT; reset approval progress.
-		throw Errors.validation('return not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) {
+			throw Errors.forbidden('Cannot return change request');
+		}
+
+		cr.approvals = [];
+		cr.committee = undefined;
+
+		this.transition(cr, CrStatus.RETURNED, CrAction.RETURN, user.id, at);
+		this.transition(cr, CrStatus.DRAFT, CrAction.RETURN, user.id, at);
+
+		return this.repo.save(cr);
 	}
 
 	reject(user: ReqUser, id: string, at: string): ChangeRequest {
-		// TODO: legal transition to REJECTED (terminal); budget untouched; audit.
-		throw Errors.validation('reject not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
+			throw Errors.forbidden('Cannot reject');
+		}
+
+		this.transition(cr, CrStatus.REJECTED, CrAction.REJECT, user.id, at);
+		return this.repo.save(cr);
 	}
 
 	apply(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: require APPROVED + cr_x_* policy; check budget.balance covers a positive delta else
 		//       INSUFFICIENT_BUDGET; update budget, set APPLIED, audit. Recompute totals from the
 		//       agreement.
-		throw Errors.validation('apply not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_x_u') && !hasPolicy(user, 'cr_x_o')) {
+			throw Errors.forbidden('Cannot apply');
+		}
+
+		const agreement = this.agreements.get(cr.agreementId);
+		if (!agreement) throw Errors.notFound('Agreement not found');
+
+		const budget = this.budgets.get(agreement.budgetId);
+		if (!budget) throw Errors.notFound('Budget not found');
+
+		cr.totals = computeTotals(agreement, cr);
+
+		if (cr.totals.delta > 0 && budget.balance < cr.totals.delta) {
+			throw Errors.insufficientBudget();
+		}
+
+		if (cr.totals.delta > 0) {
+			budget.balance = budget.balance - cr.totals.delta;
+		}
+
+		this.transition(cr, CrStatus.APPLIED, CrAction.APPLY, user.id, at);
+		return this.repo.save(cr);
 	}
 
 	/** Read a single CR. */
