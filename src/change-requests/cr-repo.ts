@@ -23,7 +23,7 @@ export class CrRepo {
 	}
 
 	findOne(user: ReqUser, id: string): ChangeRequest | undefined {
-		return this.store.get(id);
+		return this.scoped(user, [...this.store.values()]).find((cr) => cr.id === id);
 	}
 
 	save(cr: ChangeRequest): ChangeRequest {

@@ -11,6 +11,10 @@ implement, and why? -->
 
 - Fix: rounds fractional line totals to the nearest cent (not truncating)
 - Fix: rejects an illegal transition DRAFT -> APPROVED (must go through approval)
+- Fix: missing transitions in LEGAL_TRANSITIONS array
+- Implement CR workflow actions: sendForApproval, approve, returnToDraft, reject, and apply.
+- Implement committee routing and voting workflow
+- feat: enforce CR permissions and read scopes
 
 ## 2. Domain model
 

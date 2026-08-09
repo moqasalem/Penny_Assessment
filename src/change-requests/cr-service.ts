@@ -4,7 +4,7 @@ import { CrStatus, CrAction } from './cr.enums';
 import { assertTransition } from './cr-state-machine';
 import { computeTotals } from './cr-totals';
 import { Errors } from '../common/errors';
-import { ReqUser, hasPolicy } from '../common/policy';
+import { ReqUser, crReadScope, hasPolicy } from '../common/policy';
 
 /**
  * Orchestrates CR actions. The transition + audit helper is provided; the action methods are
@@ -34,23 +34,55 @@ export class CrService {
 		cr.audit = [...cr.audit, { action, byUserId, at, note }];
 	}
 
+	private canAct(user: ReqUser, cr: ChangeRequest, action: 'u' | 'a' | 'x'): boolean {
+		if (hasPolicy(user, `cr_${action}_o`)) return true;
+		if (hasPolicy(user, `cr_${action}_w`) && user.workspaceIds.includes(cr.workspaceId)) return true;
+		if (hasPolicy(user, `cr_${action}_u`) && cr.createdBy === user.id) return true;
+		return false;
+	}
+
+	private assertCanAct(user: ReqUser, cr: ChangeRequest, action: 'u' | 'a' | 'x', message: string): void {
+		if (!this.canAct(user, cr, action)) throw Errors.forbidden(message);
+	}
+
+	private canRead(user: ReqUser, cr: ChangeRequest): boolean {
+		const scope = crReadScope(user);
+		if (scope === 'o') return true;
+		if (scope === 'w') return user.workspaceIds.includes(cr.workspaceId);
+		if (scope === 'u') return cr.createdBy === user.id;
+		return false;
+	}
+
+	private assertCanRead(user: ReqUser, cr: ChangeRequest): void {
+		if (!this.canRead(user, cr)) throw Errors.forbidden('Cannot read');
+	}
+
+	private getAgreementForCr(cr: ChangeRequest): PurchaseAgreement {
+		const agreement = this.agreements.get(cr.agreementId);
+		if (!agreement || agreement.orgCode !== cr.orgCode) throw Errors.notFound('Agreement not found');
+		return agreement;
+	}
+
+	private getBudgetForCr(cr: ChangeRequest, agreement: PurchaseAgreement): Budget {
+		const budget = this.budgets.get(agreement.budgetId);
+		if (!budget || budget.orgCode !== cr.orgCode) throw Errors.notFound('Budget not found');
+		return budget;
+	}
+
 	// ---- Actions to implement -------------------------------------------------------------
 
 	submit(user: ReqUser, id: string, at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) throw Errors.forbidden('Cannot submit');
+		this.assertCanAct(user, cr, 'u', 'Cannot submit');
 		this.transition(cr, CrStatus.SUBMITTED, CrAction.SUBMIT, user.id, at);
 		return this.repo.save(cr);
 	}
 
 	sendForApproval(user: ReqUser, id: string, at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) {
-			throw Errors.forbidden('Cannot send for approval');
-		}
+		this.assertCanAct(user, cr, 'u', 'Cannot send for approval');
 
-		const agreement = this.agreements.get(cr.agreementId);
-		if (!agreement) throw Errors.notFound('Agreement not found');
+		const agreement = this.getAgreementForCr(cr);
 
 		cr.totals = computeTotals(agreement, cr);
 		const requiresCommittee = Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD;
@@ -80,9 +112,7 @@ export class CrService {
 		// TODO: permission check (cr_a_*); legal transition; record approval + audit.
 		//       Committee CRs approve only via committee resolution.
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
-			throw Errors.forbidden('Cannot approve');
-		}
+		this.assertCanAct(user, cr, 'a', 'Cannot approve');
 
 		if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
 			throw Errors.validation('Committee change requests must be approved by committee resolution');
@@ -92,8 +122,7 @@ export class CrService {
 			throw Errors.illegalTransition(`Illegal transition: cannot approve a ${cr.status} change request`);
 		}
 
-		const agreement = this.agreements.get(cr.agreementId);
-		if (!agreement) throw Errors.notFound('Agreement not found');
+		const agreement = this.getAgreementForCr(cr);
 
 		cr.totals = computeTotals(agreement, cr);
 
@@ -108,9 +137,7 @@ export class CrService {
 
 	castVote(user: ReqUser, id: string, decision: 'APPROVE' | 'REJECT', at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
-			throw Errors.forbidden('Cannot vote');
-		}
+		this.assertCanAct(user, cr, 'a', 'Cannot vote');
 
 		if (cr.status !== CrStatus.COMMITTEE_VOTING) {
 			throw Errors.illegalTransition(`Illegal transition: cannot vote on a ${cr.status} change request`);
@@ -151,9 +178,7 @@ export class CrService {
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) {
-			throw Errors.forbidden('Cannot return change request');
-		}
+		this.assertCanAct(user, cr, 'u', 'Cannot return change request');
 
 		cr.approvals = [];
 		cr.committee = undefined;
@@ -166,9 +191,7 @@ export class CrService {
 
 	reject(user: ReqUser, id: string, at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
-			throw Errors.forbidden('Cannot reject');
-		}
+		this.assertCanAct(user, cr, 'a', 'Cannot reject');
 
 		this.transition(cr, CrStatus.REJECTED, CrAction.REJECT, user.id, at);
 		return this.repo.save(cr);
@@ -179,15 +202,11 @@ export class CrService {
 		//       INSUFFICIENT_BUDGET; update budget, set APPLIED, audit. Recompute totals from the
 		//       agreement.
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_x_u') && !hasPolicy(user, 'cr_x_o')) {
-			throw Errors.forbidden('Cannot apply');
-		}
+		this.assertCanAct(user, cr, 'x', 'Cannot apply');
 
-		const agreement = this.agreements.get(cr.agreementId);
-		if (!agreement) throw Errors.notFound('Agreement not found');
+		const agreement = this.getAgreementForCr(cr);
 
-		const budget = this.budgets.get(agreement.budgetId);
-		if (!budget) throw Errors.notFound('Budget not found');
+		const budget = this.getBudgetForCr(cr, agreement);
 
 		cr.totals = computeTotals(agreement, cr);
 
@@ -205,20 +224,27 @@ export class CrService {
 
 	/** Read a single CR. */
 	get(user: ReqUser, id: string): ChangeRequest {
-		return this.getOrThrow(user, id);
+		const cr = this.getOrThrow(user, id);
+		this.assertCanRead(user, cr);
+		return cr;
 	}
 
 	/** List the CRs this user is allowed to see. Honor the user's read scope (u/w/o). */
 	list(user: ReqUser): ChangeRequest[] {
-		// TODO: org scoping happens in the repo; narrow further by the caller's read scope.
-		return this.repo.list(user);
+		const scope = crReadScope(user);
+		if (!scope) throw Errors.forbidden('Cannot read');
+
+		const crs = this.repo.list(user);
+		if (scope === 'o') return crs;
+		if (scope === 'w') return crs.filter((cr) => user.workspaceIds.includes(cr.workspaceId));
+		return crs.filter((cr) => cr.createdBy === user.id);
 	}
 
 	/** Recompute and persist totals for a CR (used by tests and before routing). Provided. */
 	recomputeTotals(user: ReqUser, id: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		const agreement = this.agreements.get(cr.agreementId);
-		if (!agreement) throw Errors.notFound('Agreement not found');
+		this.assertCanAct(user, cr, 'u', 'Cannot recompute totals');
+		const agreement = this.getAgreementForCr(cr);
 		cr.totals = computeTotals(agreement, cr);
 		return this.repo.save(cr);
 	}
