@@ -1,5 +1,5 @@
 import { CrRepo } from './cr-repo';
-import { ChangeRequest, Budget, PurchaseAgreement, COMMITTEE_DELTA_THRESHOLD } from './cr.types';
+import { ChangeRequest, Budget, PurchaseAgreement, COMMITTEE_DELTA_THRESHOLD, CommitteeVote } from './cr.types';
 import { CrStatus, CrAction } from './cr.enums';
 import { assertTransition } from './cr-state-machine';
 import { computeTotals } from './cr-totals';
@@ -53,10 +53,26 @@ export class CrService {
 		if (!agreement) throw Errors.notFound('Agreement not found');
 
 		cr.totals = computeTotals(agreement, cr);
+		const requiresCommittee = Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD;
+		if (requiresCommittee && !this.committeeConfig) {
+			throw Errors.validation('Committee configuration is required for large change requests');
+		}
 
-		const nextStatus = Math.abs(cr.totals.delta) >= COMMITTEE_DELTA_THRESHOLD ? CrStatus.COMMITTEE_VOTING : CrStatus.PENDING_APPROVAL;
+		cr.approvals = [];
+		cr.committee = undefined;
 
-		this.transition(cr, nextStatus, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
+
+		if (requiresCommittee && this.committeeConfig) {
+			cr.committee = {
+				members: this.committeeConfig.members,
+				head: this.committeeConfig.head,
+				votes: [],
+			};
+
+			this.transition(cr, CrStatus.COMMITTEE_VOTING, CrAction.SEND_FOR_APPROVAL, user.id, at, 'Routed to committee');
+		}
+
 		return this.repo.save(cr);
 	}
 
@@ -72,14 +88,65 @@ export class CrService {
 			throw Errors.validation('Committee change requests must be approved by committee resolution');
 		}
 
+		if (cr.status !== CrStatus.PENDING_APPROVAL) {
+			throw Errors.illegalTransition(`Illegal transition: cannot approve a ${cr.status} change request`);
+		}
+
+		const agreement = this.agreements.get(cr.agreementId);
+		if (!agreement) throw Errors.notFound('Agreement not found');
+
+		cr.totals = computeTotals(agreement, cr);
+
+		if (Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD) {
+			throw Errors.illegalTransition('Illegal transition: large change requests require committee voting');
+		}
+
 		cr.approvals = [...cr.approvals, { userId: user.id, action: 'APPROVE', at }];
 		this.transition(cr, CrStatus.APPROVED, CrAction.APPROVE, user.id, at);
 		return this.repo.save(cr);
 	}
 
 	castVote(user: ReqUser, id: string, decision: 'APPROVE' | 'REJECT', at: string): ChangeRequest {
-		// TODO: only committee members may vote; resolve on majority + head decision.
-		throw Errors.validation('castVote not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o')) {
+			throw Errors.forbidden('Cannot vote');
+		}
+
+		if (cr.status !== CrStatus.COMMITTEE_VOTING) {
+			throw Errors.illegalTransition(`Illegal transition: cannot vote on a ${cr.status} change request`);
+		}
+
+		if (!cr.committee || !cr.committee.members.includes(user.id)) {
+			throw Errors.forbidden('Only committee members may vote');
+		}
+
+		const votesWithoutCurrentUser = cr.committee.votes.filter((vote) => vote.userId !== user.id);
+		const vote: CommitteeVote = { userId: user.id, decision, at };
+		cr.committee = { ...cr.committee, votes: [...votesWithoutCurrentUser, vote] };
+		cr.audit = [...cr.audit, { action: CrAction.CAST_VOTE, byUserId: user.id, at, note: decision }];
+
+		const memberCount = cr.committee.members.length;
+		const majority = Math.floor(memberCount / 2) + 1;
+		const approveCount = cr.committee.votes.filter((item) => item.decision === 'APPROVE').length;
+		const rejectCount = cr.committee.votes.filter((item) => item.decision === 'REJECT').length;
+		const headVote = cr.committee.votes.find((item) => item.userId === cr.committee?.head);
+		const allVotesCast = cr.committee.votes.length === memberCount;
+		const approved = approveCount >= majority && headVote?.decision === 'APPROVE';
+		const rejected = headVote?.decision === 'REJECT' || rejectCount >= majority || (allVotesCast && !approved);
+
+		if (approved || rejected) {
+			cr.committee = { ...cr.committee, resolvedAt: at };
+			this.transition(cr, CrStatus.COMMITTEE_DECISION, CrAction.RESOLVE_COMMITTEE, user.id, at);
+
+			if (approved) {
+				cr.approvals = [...cr.approvals, { userId: user.id, action: 'APPROVE', at }];
+				this.transition(cr, CrStatus.APPROVED, CrAction.APPROVE, user.id, at);
+			} else {
+				this.transition(cr, CrStatus.REJECTED, CrAction.REJECT, user.id, at);
+			}
+		}
+
+		return this.repo.save(cr);
 	}
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
