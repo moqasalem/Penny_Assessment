@@ -24,18 +24,31 @@ describe('CR workflow invariants', () => {
 		const agreement = agreements.get('AGR-1');
 		if (!agreement) throw new Error('Missing agreement fixture');
 
+		const originalBudgetId = agreement.budgetId;
 		agreement.budgetId = 'BUD-LOW';
 
-		service.submit(users.alice, 'CR-DRAFT', now);
-		service.sendForApproval(users.mona, 'CR-DRAFT', now);
-		service.approve(users.mona, 'CR-DRAFT', now);
+		try {
+			service.submit(users.alice, 'CR-DRAFT', now);
+			service.sendForApproval(users.mona, 'CR-DRAFT', now);
+			service.approve(users.mona, 'CR-DRAFT', now);
 
-		expect(() => service.apply(users.mona, 'CR-DRAFT', now)).toThrow(/INSUFFICIENT_BUDGET|budget/i);
-		expect(budgets.get('BUD-LOW')?.balance).toBe(100);
-		expect(service.get(users.mona, 'CR-DRAFT').status).toBe(CrStatus.APPROVED);
+			expect(() => service.apply(users.mona, 'CR-DRAFT', now)).toThrow(/INSUFFICIENT_BUDGET|budget/i);
+			expect(budgets.get('BUD-LOW')?.balance).toBe(100);
+			expect(service.get(users.mona, 'CR-DRAFT').status).toBe(CrStatus.APPROVED);
+		} finally {
+			agreement.budgetId = originalBudgetId;
+		}
 	});
 
-	it('does not consume budget when applying a negative delta', () => {
+	it('does not change budget when applying before approval fails', () => {
+		const { service, users, budgets } = makeService();
+
+		expect(() => service.apply(users.mona, 'CR-PENDING-SMALL', now)).toThrow(/ILLEGAL_TRANSITION|illegal|not allowed/i);
+		expect(budgets.get('BUD-1')?.balance).toBe(10000);
+		expect(service.get(users.mona, 'CR-PENDING-SMALL').status).toBe(CrStatus.PENDING_APPROVAL);
+	});
+
+	it('releases budget when applying a negative delta', () => {
 		const seed = buildSeed();
 		const approvedReduction: ChangeRequest = {
 			...seed.changeRequests[0],
@@ -57,7 +70,7 @@ describe('CR workflow invariants', () => {
 
 		expect(applied.status).toBe(CrStatus.APPLIED);
 		expect(applied.totals.delta).toBe(-1000);
-		expect(budgets.get('BUD-1')?.balance).toBe(10000);
+		expect(budgets.get('BUD-1')?.balance).toBe(11000);
 	});
 
 	it('keeps terminal states immutable', () => {

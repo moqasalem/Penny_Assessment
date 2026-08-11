@@ -5,6 +5,7 @@ import { assertTransition } from './cr-state-machine';
 import { computeTotals } from './cr-totals';
 import { Errors } from '../common/errors';
 import { ReqUser, crReadScope, hasPolicy } from '../common/policy';
+import { round2 } from '../common/money.util';
 
 /**
  * Orchestrates CR actions. The transition + audit helper is provided; the action methods are
@@ -204,6 +205,9 @@ export class CrService {
 		const cr = this.getOrThrow(user, id);
 		this.assertCanAct(user, cr, 'x', 'Cannot apply');
 
+		// Validate state before changing budget
+		assertTransition(cr.status, CrStatus.APPLIED);
+
 		const agreement = this.getAgreementForCr(cr);
 
 		const budget = this.getBudgetForCr(cr, agreement);
@@ -214,9 +218,9 @@ export class CrService {
 			throw Errors.insufficientBudget();
 		}
 
-		if (cr.totals.delta > 0) {
-			budget.balance = budget.balance - cr.totals.delta;
-		}
+		// Positive delta decreases balance.
+		// Negative delta increases balance.
+		budget.balance = round2(budget.balance - cr.totals.delta);
 
 		this.transition(cr, CrStatus.APPLIED, CrAction.APPLY, user.id, at);
 		return this.repo.save(cr);
