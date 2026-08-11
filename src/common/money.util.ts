@@ -5,14 +5,24 @@
  * Heads-up: one of the helpers here has a defect that surfaces in `test/cr-totals.spec.ts`.
  */
 
+const CENTS_PER_UNIT = 100;
+
+function toCents(value: number): number {
+	return Math.round((value + Number.EPSILON) * CENTS_PER_UNIT);
+}
+
+function fromCents(cents: number): number {
+	return cents / CENTS_PER_UNIT;
+}
+
 /** Round a value to 2 decimal places. */
 export function round2(value: number): number {
-	return Math.round(value * 100) / 100;
+	return fromCents(toCents(value));
 }
 
 /** Sum a list of monetary amounts. */
 export function sumMoney(amounts: number[]): number {
-	return round2(amounts.reduce((acc, n) => acc + n, 0));
+	return fromCents(amounts.reduce((acc, n) => acc + toCents(n), 0));
 }
 
 /** Compute a single line total = quantity * unitPrice, rounded to 2dp. */
