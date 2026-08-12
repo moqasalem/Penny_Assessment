@@ -100,4 +100,30 @@ describe('CR workflow invariants', () => {
 		expect(returned.approvals).toEqual([]);
 		expect(returned.committee).toBeUndefined();
 	});
+
+	it('does not persist partial mutations when sending for approval fails', () => {
+		const seed = buildSeed();
+		const draftWithProgress: ChangeRequest = {
+			...seed.changeRequests[0],
+			id: 'CR-DRAFT-WITH-PROGRESS',
+			status: CrStatus.DRAFT,
+			totals: { baselineTotal: 1, newTotal: 2, delta: 1 },
+			approvals: [{ userId: 'mona', action: 'APPROVE', at: now }],
+			committee: { members: ['carl', 'dina'], head: 'dina', votes: [{ userId: 'carl', decision: 'APPROVE', at: now }] },
+			audit: [],
+		};
+		const { service, users } = makeService([draftWithProgress]);
+
+		expect(() => service.sendForApproval(users.mona, 'CR-DRAFT-WITH-PROGRESS', now)).toThrow(/ILLEGAL_TRANSITION|illegal/i);
+
+		const stored = service.get(users.mona, 'CR-DRAFT-WITH-PROGRESS');
+		expect(stored.status).toBe(CrStatus.DRAFT);
+		expect(stored.totals).toEqual({ baselineTotal: 1, newTotal: 2, delta: 1 });
+		expect(stored.approvals).toEqual([{ userId: 'mona', action: 'APPROVE', at: now }]);
+		expect(stored.committee).toEqual({
+			members: ['carl', 'dina'],
+			head: 'dina',
+			votes: [{ userId: 'carl', decision: 'APPROVE', at: now }],
+		});
+	});
 });

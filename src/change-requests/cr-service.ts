@@ -83,9 +83,13 @@ export class CrService {
 		const cr = this.getOrThrow(user, id);
 		this.assertCanAct(user, cr, 'u', 'Cannot send for approval');
 
-		const agreement = this.getAgreementForCr(cr);
+		if (cr.status !== CrStatus.PENDING_APPROVAL) {
+			assertTransition(cr.status, CrStatus.PENDING_APPROVAL);
+		}
 
+		const agreement = this.getAgreementForCr(cr);
 		cr.totals = computeTotals(agreement, cr);
+
 		const requiresCommittee = Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD;
 		if (requiresCommittee && !this.committeeConfig) {
 			throw Errors.validation('Committee configuration is required for large change requests');
@@ -94,7 +98,7 @@ export class CrService {
 		cr.approvals = [];
 		cr.committee = undefined;
 
-		// Prevent a user from sending a CR for approval if it is already in PENDING_APPROVAL
+		// Avoid re-entering PENDING_APPROVAL for CRs that are already pending.
 		if (cr.status !== CrStatus.PENDING_APPROVAL) {
 			this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
 		}
