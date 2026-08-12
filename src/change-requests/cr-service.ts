@@ -94,11 +94,14 @@ export class CrService {
 		cr.approvals = [];
 		cr.committee = undefined;
 
-		this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		// Prevent a user from sending a CR for approval if it is already in PENDING_APPROVAL
+		if (cr.status !== CrStatus.PENDING_APPROVAL) {
+			this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		}
 
 		if (requiresCommittee && this.committeeConfig) {
 			cr.committee = {
-				members: this.committeeConfig.members,
+				members: [...this.committeeConfig.members], // preserve the historical state of the request rather than relying on mutable references
 				head: this.committeeConfig.head,
 				votes: [],
 			};

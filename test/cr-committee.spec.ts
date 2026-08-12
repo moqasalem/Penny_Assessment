@@ -45,6 +45,47 @@ describe('committee routing', () => {
 		});
 	});
 
+	it('routes a large CR that is already pending approval to committee voting', () => {
+		const seed = buildSeed();
+		const repo = new CrRepo();
+		repo.seed(seed.changeRequests);
+		const service = new CrService(repo, seed.agreements, seed.budgets, seed.committeeConfig);
+
+		const routed = service.sendForApproval(seed.users.mona, 'CR-PENDING-LARGE', now);
+
+		expect(routed.status).toBe(CrStatus.COMMITTEE_VOTING);
+		expect(routed.committee).toEqual({
+			members: ['carl', 'dina'],
+			head: 'dina',
+			votes: [],
+		});
+	});
+
+	it('snapshots committee members when routing a CR', () => {
+		const seed = buildSeed();
+		const repo = new CrRepo();
+		const largePending = seed.changeRequests.find((cr) => cr.id === 'CR-PENDING-LARGE');
+		if (!largePending) throw new Error('Missing large CR fixture');
+
+		const largeSubmitted: ChangeRequest = {
+			...largePending,
+			id: 'CR-SNAPSHOT-COMMITTEE',
+			status: CrStatus.SUBMITTED,
+			approvals: [],
+			committee: undefined,
+			audit: [],
+		};
+		const committeeConfig = { members: ['carl', 'dina'], head: 'dina' };
+		repo.seed([...seed.changeRequests, largeSubmitted]);
+		const service = new CrService(repo, seed.agreements, seed.budgets, committeeConfig);
+
+		const routed = service.sendForApproval(seed.users.mona, 'CR-SNAPSHOT-COMMITTEE', now);
+		committeeConfig.members.push('mona');
+
+		expect(routed.committee?.members).toEqual(['carl', 'dina']);
+		expect(service.get(seed.users.mona, 'CR-SNAPSHOT-COMMITTEE').committee?.members).toEqual(['carl', 'dina']);
+	});
+
 	it('approves after majority approval plus committee head approval', () => {
 		const { service, users, id } = makeServiceWithLargeSubmitted();
 
